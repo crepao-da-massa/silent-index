@@ -23,9 +23,10 @@ namespace silent {
 constexpr int Dims = 14;
 constexpr int Block = 8;
 constexpr uint64_t Magic = 0x3149564936324852ULL; // "RH26IVI1", little-endian
-constexpr uint32_t Version = 1;
+constexpr uint32_t Version = 2;
 constexpr uint32_t MaxRepairClusters = 2048;
 constexpr uint32_t MaxRepairWords = (MaxRepairClusters + 63) / 64;
+constexpr int DimPairs = Dims / 2;
 
 struct IndexHeader {
     uint64_t magic;
@@ -118,6 +119,10 @@ inline uint64_t dist_q16(const int16_t* a, const int16_t* b) {
         s += uint64_t(diff * diff);
     }
     return s;
+}
+
+inline size_t block_pair_offset(int dim_pair, uint32_t lane) {
+    return size_t(dim_pair) * Block * 2 + size_t(lane) * 2;
 }
 
 inline uint64_t dist_centroid(const int16_t* q, const int16_t* centroids, uint32_t c) {
@@ -355,6 +360,20 @@ private:
         }
     };
 
+    struct QueryPairs {
+        alignas(32) __m256i pair[DimPairs];
+    };
+
+    static QueryPairs make_query_pairs(const int16_t q[Dims]) {
+        QueryPairs out{};
+        for (int pair = 0; pair < DimPairs; ++pair) {
+            int d = pair * 2;
+            uint32_t packed = uint32_t(uint16_t(q[d])) | (uint32_t(uint16_t(q[d + 1])) << 16);
+            out.pair[pair] = _mm256_set1_epi32(int(packed));
+        }
+        return out;
+    }
+
     void build_aux_soa() {
         const uint32_t kk = k();
         centroids_soa_.resize(size_t(kk) * Dims);
@@ -471,6 +490,7 @@ private:
 
     uint8_t search_two_with_repair_avx2(const int16_t q[Dims], int repair_min, int repair_max, SearchStats* stats) const {
         const uint32_t kk = k();
+        QueryPairs qp = make_query_pairs(q);
         uint32_t best0 = 0;
         uint32_t best1 = 1;
         find_two_centroids_avx2(q, best0, best1);
@@ -479,14 +499,14 @@ private:
         std::array<uint64_t, MaxRepairWords> scanned{};
         if (((kk + 63) / 64) > scanned.size()) index_fatal();
 
-        scan_cluster(best0, q, top);
+        scan_cluster(best0, q, qp, top);
         scanned[best0 >> 6] |= uint64_t(1) << (best0 & 63);
         if (stats) ++stats->initial_scanned;
 
         if (bbox_lower_bound(q, bbox_min_, bbox_max_, best1) >= top.worst_dist()) {
             if (stats) ++stats->initial_pruned;
         } else {
-            scan_cluster(best1, q, top);
+            scan_cluster(best1, q, qp, top);
             if (stats) ++stats->initial_scanned;
         }
         scanned[best1 >> 6] |= uint64_t(1) << (best1 & 63);
@@ -510,7 +530,7 @@ private:
                         if (stats) ++stats->repair_pruned;
                         continue;
                     }
-                    scan_cluster(cluster, q, top);
+                    scan_cluster(cluster, q, qp, top);
                     if (stats) ++stats->repair_scanned;
                 }
             }
@@ -520,7 +540,7 @@ private:
                     if (stats) ++stats->repair_pruned;
                     continue;
                 }
-                scan_cluster(c, q, top);
+                scan_cluster(c, q, qp, top);
                 if (stats) ++stats->repair_scanned;
             }
             fraud = top.fraud_count();
@@ -534,17 +554,18 @@ private:
     }
 
     uint8_t search_two_no_repair_avx2(const int16_t q[Dims], SearchStats* stats) const {
+        QueryPairs qp = make_query_pairs(q);
         uint32_t best0 = 0;
         uint32_t best1 = 1;
         find_two_centroids_avx2(q, best0, best1);
 
         Top5 top;
-        scan_cluster(best0, q, top);
+        scan_cluster(best0, q, qp, top);
         if (stats) ++stats->initial_scanned;
         if (bbox_lower_bound(q, bbox_min_, bbox_max_, best1) >= top.worst_dist()) {
             if (stats) ++stats->initial_pruned;
         } else {
-            scan_cluster(best1, q, top);
+            scan_cluster(best1, q, qp, top);
             if (stats) ++stats->initial_scanned;
         }
         uint8_t fraud = top.fraud_count();
@@ -723,6 +744,11 @@ private:
     }
 
     void scan_cluster(uint32_t c, const int16_t q[Dims], Top5& top) const {
+        QueryPairs qp = make_query_pairs(q);
+        scan_cluster(c, q, qp, top);
+    }
+
+    void scan_cluster(uint32_t c, const int16_t q[Dims], const QueryPairs& qp, Top5& top) const {
         uint32_t start = offsets_[c];
         uint32_t count = counts_[c];
         uint32_t blocks = (count + Block - 1) / Block;
@@ -732,14 +758,15 @@ private:
             const int16_t* block = blocks_ + size_t(block_id) * Dims * Block;
             const uint8_t* labels = labels_ + size_t(block_id) * Block;
             if (valid == Block) {
-                scan_block8_avx2(block, labels, q, top);
+                scan_block8_avx2(block, labels, qp, top);
                 continue;
             }
             for (uint32_t lane = 0; lane < valid; ++lane) {
                 uint32_t s = 0;
                 uint32_t limit = top.worst_dist();
                 for (int d = 0; d < Dims; ++d) {
-                    int32_t diff = int32_t(q[d]) - int32_t(block[d * Block + lane]);
+                    int32_t diff = int32_t(q[d]) -
+                                   int32_t(block[block_pair_offset(d / 2, lane) + size_t(d & 1)]);
                     s += uint32_t(diff * diff);
                     if (s >= limit) break;
                 }
@@ -748,17 +775,13 @@ private:
         }
     }
 
-    static void scan_block8_avx2(const int16_t* block, const uint8_t* labels, const int16_t q[Dims], Top5& top) {
+    static void scan_block8_avx2(const int16_t* block, const uint8_t* labels, const QueryPairs& qp, Top5& top) {
         __m256i acc = _mm256_setzero_si256();
-        for (int d = 0; d < Dims; d += 2) {
-            __m128i ref0 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(block + d * Block));
-            __m128i ref1 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(block + (d + 1) * Block));
-            __m128i diff0 = _mm_sub_epi16(_mm_set1_epi16(q[d]), ref0);
-            __m128i diff1 = _mm_sub_epi16(_mm_set1_epi16(q[d + 1]), ref1);
-            __m128i lo = _mm_unpacklo_epi16(diff0, diff1);
-            __m128i hi = _mm_unpackhi_epi16(diff0, diff1);
-            __m256i pairs = _mm256_set_m128i(hi, lo);
-            acc = _mm256_add_epi32(acc, _mm256_madd_epi16(pairs, pairs));
+        for (int pair = 0; pair < DimPairs; ++pair) {
+            __m256i ref = _mm256_loadu_si256(
+                reinterpret_cast<const __m256i*>(block + size_t(pair) * Block * 2));
+            __m256i diff = _mm256_sub_epi16(qp.pair[pair], ref);
+            acc = _mm256_add_epi32(acc, _mm256_madd_epi16(diff, diff));
         }
 
         uint32_t limit = top.worst_dist();

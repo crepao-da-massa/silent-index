@@ -47,15 +47,23 @@ size_t object_end(std::string_view s, size_t open) {
 struct LatencyBucket {
     std::vector<double> total_us;
     std::vector<double> search_us;
+    uint64_t initial_scanned = 0;
+    uint64_t initial_pruned = 0;
+    uint64_t repair_scanned = 0;
+    uint64_t repair_pruned = 0;
 
     void reserve(size_t n) {
         total_us.reserve(n);
         search_us.reserve(n);
     }
 
-    void add(double total, double search) {
+    void add(double total, double search, const silent::SearchStats& stats) {
         total_us.push_back(total);
         search_us.push_back(search);
+        initial_scanned += stats.initial_scanned;
+        initial_pruned += stats.initial_pruned;
+        repair_scanned += stats.repair_scanned;
+        repair_pruned += stats.repair_pruned;
     }
 };
 
@@ -83,7 +91,11 @@ void print_bucket(const char* name, const LatencyBucket& bucket) {
               << " " << name << "_avg_search_us=" << (count > 0 ? search_sum / count : 0.0)
               << " " << name << "_p95_search_us=" << percentile_sorted(bucket.search_us, 0.95)
               << " " << name << "_p99_search_us=" << percentile_sorted(bucket.search_us, 0.99)
-              << " " << name << "_max_search_us=" << (bucket.search_us.empty() ? 0.0 : bucket.search_us.back());
+              << " " << name << "_max_search_us=" << (bucket.search_us.empty() ? 0.0 : bucket.search_us.back())
+              << " " << name << "_avg_initial_scanned=" << (count > 0 ? double(bucket.initial_scanned) / count : 0.0)
+              << " " << name << "_avg_initial_pruned=" << (count > 0 ? double(bucket.initial_pruned) / count : 0.0)
+              << " " << name << "_avg_repair_scanned=" << (count > 0 ? double(bucket.repair_scanned) / count : 0.0)
+              << " " << name << "_avg_repair_pruned=" << (count > 0 ? double(bucket.repair_pruned) / count : 0.0);
 }
 
 } // namespace
@@ -102,6 +114,7 @@ int main(int argc, char** argv) {
     cfg.repair_max = std::getenv("REPAIR_MAX") ? std::atoi(std::getenv("REPAIR_MAX")) : 4;
     cfg.adaptive_min = std::getenv("ADAPTIVE_MIN") ? std::atoi(std::getenv("ADAPTIVE_MIN")) : 1;
     cfg.adaptive_max = std::getenv("ADAPTIVE_MAX") ? std::atoi(std::getenv("ADAPTIVE_MAX")) : 4;
+    bool breakdown = std::getenv("PROFILE_BREAKDOWN") && std::atoi(std::getenv("PROFILE_BREAKDOWN")) != 0;
 
     std::string json = read_all(argv[2]);
     std::string_view all(json);
@@ -133,6 +146,8 @@ int main(int argc, char** argv) {
         uint8_t fraud = 0;
         if (!vectorize_fast(req, q)) {
             ++parse_errors;
+        } else if (!breakdown) {
+            fraud = search_fraud(index, q, cfg);
         } else {
             auto search0 = Clock::now();
             silent::SearchStats stats;
@@ -150,9 +165,9 @@ int main(int argc, char** argv) {
             double search_us = std::chrono::duration<double, std::micro>(Clock::now() - search0).count();
             double total_us = std::chrono::duration<double, std::micro>(Clock::now() - q0).count();
             if (stats.repair_triggered) {
-                repair_bucket.add(total_us, search_us);
+                repair_bucket.add(total_us, search_us, stats);
             } else {
-                non_repair_bucket.add(total_us, search_us);
+                non_repair_bucket.add(total_us, search_us, stats);
             }
         }
         per_request_us.push_back(std::chrono::duration<double, std::micro>(Clock::now() - q0).count());
@@ -185,8 +200,10 @@ int main(int argc, char** argv) {
               << " fp=" << fp
               << " fn=" << fn
               << " parse_errors=" << parse_errors;
-    print_bucket("repair", repair_bucket);
-    print_bucket("non_repair", non_repair_bucket);
+    if (breakdown) {
+        print_bucket("repair", repair_bucket);
+        print_bucket("non_repair", non_repair_bucket);
+    }
     std::cout << "\n";
     return 0;
 }

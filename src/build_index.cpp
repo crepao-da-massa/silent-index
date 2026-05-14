@@ -297,7 +297,7 @@ static void write_index(
             int16_t* dst = blocks.data() + size_t(block) * silent::Dims * silent::Block;
             for (int d = 0; d < silent::Dims; ++d) {
                 int16_t v = src[d];
-                dst[d * silent::Block + lane] = v;
+                dst[silent::block_pair_offset(d / 2, lane) + size_t(d & 1)] = v;
                 auto idx = size_t(c) * silent::Dims + d;
                 bmin[idx] = std::min(bmin[idx], v);
                 bmax[idx] = std::max(bmax[idx], v);
