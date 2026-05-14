@@ -6,6 +6,7 @@
 #include <chrono>
 #include <fstream>
 #include <iostream>
+#include <numeric>
 #include <string>
 #include <vector>
 
@@ -43,6 +44,48 @@ size_t object_end(std::string_view s, size_t open) {
     bench_fatal("unterminated object");
 }
 
+struct LatencyBucket {
+    std::vector<double> total_us;
+    std::vector<double> search_us;
+
+    void reserve(size_t n) {
+        total_us.reserve(n);
+        search_us.reserve(n);
+    }
+
+    void add(double total, double search) {
+        total_us.push_back(total);
+        search_us.push_back(search);
+    }
+};
+
+double percentile_sorted(const std::vector<double>& values, double pctl) {
+    if (values.empty()) return 0.0;
+    size_t idx = std::min(values.size() - 1, static_cast<size_t>(pctl * double(values.size() - 1)));
+    return values[idx];
+}
+
+void sort_bucket(LatencyBucket& bucket) {
+    std::sort(bucket.total_us.begin(), bucket.total_us.end());
+    std::sort(bucket.search_us.begin(), bucket.search_us.end());
+}
+
+void print_bucket(const char* name, const LatencyBucket& bucket) {
+    const double total_sum = std::accumulate(bucket.total_us.begin(), bucket.total_us.end(), 0.0);
+    const double search_sum = std::accumulate(bucket.search_us.begin(), bucket.search_us.end(), 0.0);
+    const double count = double(bucket.total_us.size());
+    std::cout << " " << name
+              << "_count=" << bucket.total_us.size()
+              << " " << name << "_avg_total_us=" << (count > 0 ? total_sum / count : 0.0)
+              << " " << name << "_p95_total_us=" << percentile_sorted(bucket.total_us, 0.95)
+              << " " << name << "_p99_total_us=" << percentile_sorted(bucket.total_us, 0.99)
+              << " " << name << "_max_total_us=" << (bucket.total_us.empty() ? 0.0 : bucket.total_us.back())
+              << " " << name << "_avg_search_us=" << (count > 0 ? search_sum / count : 0.0)
+              << " " << name << "_p95_search_us=" << percentile_sorted(bucket.search_us, 0.95)
+              << " " << name << "_p99_search_us=" << percentile_sorted(bucket.search_us, 0.99)
+              << " " << name << "_max_search_us=" << (bucket.search_us.empty() ? 0.0 : bucket.search_us.back());
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -64,6 +107,10 @@ int main(int argc, char** argv) {
     std::string_view all(json);
     std::vector<double> per_request_us;
     per_request_us.reserve(60000);
+    LatencyBucket repair_bucket;
+    LatencyBucket non_repair_bucket;
+    repair_bucket.reserve(60000);
+    non_repair_bucket.reserve(60000);
 
     uint32_t fp = 0;
     uint32_t fn = 0;
@@ -87,7 +134,26 @@ int main(int argc, char** argv) {
         if (!vectorize_fast(req, q)) {
             ++parse_errors;
         } else {
-            fraud = search_fraud(index, q, cfg);
+            auto search0 = Clock::now();
+            silent::SearchStats stats;
+            if (cfg.fast_nprobe > 0 && cfg.fast_nprobe < cfg.nprobe) {
+                silent::SearchStats fast_stats;
+                fraud = index.search(q, cfg.fast_nprobe, 99, 0, &fast_stats);
+                if (fraud >= cfg.adaptive_min && fraud <= cfg.adaptive_max) {
+                    fraud = index.search(q, cfg.nprobe, cfg.repair_min, cfg.repair_max, &stats);
+                } else {
+                    stats = fast_stats;
+                }
+            } else {
+                fraud = index.search(q, cfg.nprobe, cfg.repair_min, cfg.repair_max, &stats);
+            }
+            double search_us = std::chrono::duration<double, std::micro>(Clock::now() - search0).count();
+            double total_us = std::chrono::duration<double, std::micro>(Clock::now() - q0).count();
+            if (stats.repair_triggered) {
+                repair_bucket.add(total_us, search_us);
+            } else {
+                non_repair_bucket.add(total_us, search_us);
+            }
         }
         per_request_us.push_back(std::chrono::duration<double, std::micro>(Clock::now() - q0).count());
 
@@ -102,6 +168,8 @@ int main(int argc, char** argv) {
 
     double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
     std::sort(per_request_us.begin(), per_request_us.end());
+    sort_bucket(repair_bucket);
+    sort_bucket(non_repair_bucket);
     auto pct = [&](double pctl) {
         size_t idx = std::min(per_request_us.size() - 1, static_cast<size_t>(pctl * double(per_request_us.size() - 1)));
         return per_request_us[idx];
@@ -116,7 +184,9 @@ int main(int argc, char** argv) {
               << " max_us=" << per_request_us.back()
               << " fp=" << fp
               << " fn=" << fn
-              << " parse_errors=" << parse_errors
-              << "\n";
+              << " parse_errors=" << parse_errors;
+    print_bucket("repair", repair_bucket);
+    print_bucket("non_repair", non_repair_bucket);
+    std::cout << "\n";
     return 0;
 }
