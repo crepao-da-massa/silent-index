@@ -276,6 +276,15 @@ int main(int argc, char** argv) {
         uint64_t repair_pruned = 0;
         std::array<uint32_t, 6> initial_frauds{};
         std::array<uint32_t, 6> final_frauds{};
+        std::array<std::array<uint32_t, 6>, 6> fraud_transitions{};
+        std::array<uint32_t, 6> ok_by_initial{};
+        std::array<uint32_t, 6> fail_by_initial{};
+        std::array<uint64_t, 6> ok_min_worst{};
+        std::array<uint64_t, 6> ok_max_worst{};
+        std::array<uint64_t, 6> fail_min_worst{};
+        std::array<uint64_t, 6> fail_max_worst{};
+        ok_min_worst.fill(UINT64_MAX);
+        fail_min_worst.fill(UINT64_MAX);
         std::vector<double> per_query_us;
         per_query_us.reserve(queries.size());
         auto t0 = Clock::now();
@@ -291,10 +300,19 @@ int main(int argc, char** argv) {
             repair_pruned += stats.repair_pruned;
             ++initial_frauds[std::min<uint8_t>(stats.initial_fraud, 5)];
             ++final_frauds[std::min<uint8_t>(stats.final_fraud, 5)];
+            ++fraud_transitions[std::min<uint8_t>(stats.initial_fraud, 5)][std::min<uint8_t>(stats.final_fraud, 5)];
             bool approved = fraud < 3;
+            uint8_t initial = std::min<uint8_t>(stats.initial_fraud, 5);
             if (approved != expected[i]) {
+                ++fail_by_initial[initial];
+                fail_min_worst[initial] = std::min<uint64_t>(fail_min_worst[initial], stats.initial_worst_dist);
+                fail_max_worst[initial] = std::max<uint64_t>(fail_max_worst[initial], stats.initial_worst_dist);
                 if (approved) ++fn;
                 else ++fp;
+            } else {
+                ++ok_by_initial[initial];
+                ok_min_worst[initial] = std::min<uint64_t>(ok_min_worst[initial], stats.initial_worst_dist);
+                ok_max_worst[initial] = std::max<uint64_t>(ok_max_worst[initial], stats.initial_worst_dist);
             }
         }
         auto ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
@@ -323,6 +341,25 @@ int main(int argc, char** argv) {
                   << " final_frauds=["
                   << final_frauds[0] << "," << final_frauds[1] << "," << final_frauds[2] << ","
                   << final_frauds[3] << "," << final_frauds[4] << "," << final_frauds[5] << "]"
+                  << " transitions=[";
+        for (size_t from = 0; from < fraud_transitions.size(); ++from) {
+            if (from != 0) std::cout << ";";
+            std::cout << fraud_transitions[from][0] << "," << fraud_transitions[from][1] << ","
+                      << fraud_transitions[from][2] << "," << fraud_transitions[from][3] << ","
+                      << fraud_transitions[from][4] << "," << fraud_transitions[from][5];
+        }
+        std::cout << "]"
+                  << " worst_ranges=[";
+        for (size_t f = 0; f < 6; ++f) {
+            if (f != 0) std::cout << ";";
+            std::cout << ok_by_initial[f] << ":"
+                      << (ok_by_initial[f] ? ok_min_worst[f] : 0) << ":"
+                      << (ok_by_initial[f] ? ok_max_worst[f] : 0) << ":"
+                      << fail_by_initial[f] << ":"
+                      << (fail_by_initial[f] ? fail_min_worst[f] : 0) << ":"
+                      << (fail_by_initial[f] ? fail_max_worst[f] : 0);
+        }
+        std::cout << "]"
                   << " fp=" << fp
                   << " fn=" << fn
                   << " failures=" << (fp + fn)
