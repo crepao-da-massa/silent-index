@@ -1,0 +1,14 @@
+.git
+.gitignore
+.cache
+build
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.bin
+bench/test-data.json
+bench/results.json
+bench/results-*.json

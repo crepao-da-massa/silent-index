@@ -1,0 +1,93 @@
+services:
+  lb:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: silent_index:dev
+    entrypoint: ["/fd-lb"]
+    ports:
+      - "9999:9999"
+    environment:
+      - UPSTREAMS=/sockets/api1.sock,/sockets/api2.sock
+      - PORT=9999
+    volumes:
+      - sockets:/sockets
+    depends_on:
+      - api1
+      - api2
+    logging:
+      driver: "none"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    deploy:
+      resources:
+        limits:
+          cpus: "0.10"
+          memory: "30M"
+
+  api1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: silent_index:dev
+    environment:
+      - LISTEN=/sockets/api1.sock
+      - INDEX_PATH=/index/index.bin
+      - NPROBE=2
+      - FAST_NPROBE=0
+      - ADAPTIVE_MIN=1
+      - ADAPTIVE_MAX=4
+      - REPAIR_MIN=1
+      - REPAIR_MAX=4
+      - INDEX_MMAP=1
+      - MALLOC_ARENA_MAX=1
+    volumes:
+      - sockets:/sockets
+    logging:
+      driver: "none"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    deploy:
+      resources:
+        limits:
+          cpus: "0.45"
+          memory: "160M"
+
+  api2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: silent_index:dev
+    environment:
+      - LISTEN=/sockets/api2.sock
+      - INDEX_PATH=/index/index.bin
+      - NPROBE=2
+      - FAST_NPROBE=0
+      - ADAPTIVE_MIN=1
+      - ADAPTIVE_MAX=4
+      - REPAIR_MIN=1
+      - REPAIR_MAX=4
+      - INDEX_MMAP=1
+      - MALLOC_ARENA_MAX=1
+    volumes:
+      - sockets:/sockets
+    depends_on:
+      - api1
+    logging:
+      driver: "none"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    deploy:
+      resources:
+        limits:
+          cpus: "0.45"
+          memory: "160M"
+
+volumes:
+  sockets:

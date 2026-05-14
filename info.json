@@ -1,0 +1,7 @@
+{
+  "participants": ["crepao-da-massa"],
+  "social": ["https://github.com/crepao-da-massa"],
+  "source-code-repo": "https://github.com/crepao-da-massa/silent-index",
+  "stack": ["c++20", "c", "ivf", "avx2", "fd-passing"],
+  "open_to_work": false
+}
