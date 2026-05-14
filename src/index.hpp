@@ -87,7 +87,7 @@ inline int16_t qround(double v) {
 inline int16_t qclamp01(double v) {
     if (v < 0.0) v = 0.0;
     if (v > 1.0) v = 1.0;
-    return static_cast<int16_t>(__builtin_llround(v * 10000.0));
+    return static_cast<int16_t>(v * 10000.0 + 0.5);
 }
 
 inline uint32_t hsum256_epi32(__m256i v) {
