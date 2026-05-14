@@ -1,9 +1,6 @@
 services:
   lb:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: silent_index:dev
+    image: ghcr.io/crepao-da-massa/silent-index:latest
     entrypoint: ["/fd-lb"]
     ports:
       - "9999:9999"
@@ -28,10 +25,7 @@ services:
           memory: "30M"
 
   api1:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: silent_index:dev
+    image: ghcr.io/crepao-da-massa/silent-index:latest
     environment:
       - LISTEN=/sockets/api1.sock
       - INDEX_PATH=/index/index.bin
@@ -58,10 +52,7 @@ services:
           memory: "160M"
 
   api2:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: silent_index:dev
+    image: ghcr.io/crepao-da-massa/silent-index:latest
     environment:
       - LISTEN=/sockets/api2.sock
       - INDEX_PATH=/index/index.bin
