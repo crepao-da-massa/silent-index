@@ -129,9 +129,7 @@ inline uint64_t dist_centroid(const int16_t* q, const int16_t* centroids, uint32
     return dist_q16(q, centroids + size_t(c) * Dims);
 }
 
-inline uint64_t bbox_lower_bound(const int16_t* q, const int16_t* bmin, const int16_t* bmax, uint32_t c) {
-    const int16_t* mn = bmin + size_t(c) * Dims;
-    const int16_t* mx = bmax + size_t(c) * Dims;
+inline uint64_t bbox_lower_bound_raw(const int16_t* q, const int16_t* mn, const int16_t* mx) {
     __m128i qv = _mm_loadu_si128(reinterpret_cast<const __m128i*>(q));
     __m128i mnv = _mm_loadu_si128(reinterpret_cast<const __m128i*>(mn));
     __m128i mxv = _mm_loadu_si128(reinterpret_cast<const __m128i*>(mx));
@@ -149,17 +147,37 @@ inline uint64_t bbox_lower_bound(const int16_t* q, const int16_t* bmin, const in
     return s;
 }
 
+inline uint64_t bbox_lower_bound(const int16_t* q, const int16_t* bmin, const int16_t* bmax, uint32_t c) {
+    return bbox_lower_bound_raw(q, bmin + size_t(c) * Dims, bmax + size_t(c) * Dims);
+}
+
 struct SearchStats {
     uint32_t initial_scanned = 0;
     uint32_t initial_pruned = 0;
+    uint32_t initial_blocks = 0;
     uint32_t repair_scanned = 0;
     uint32_t repair_pruned = 0;
+    uint32_t repair_blocks = 0;
+    uint32_t repair_candidates = 0;
     bool repair_triggered = false;
     uint8_t initial_fraud = 0;
     uint8_t final_fraud = 0;
     uint64_t initial_worst_dist = 0;
     uint64_t final_worst_dist = 0;
+    uint64_t centroid_cycles = 0;
+    uint64_t initial_cycles = 0;
+    uint64_t repair_select_cycles = 0;
+    uint64_t repair_sort_cycles = 0;
+    uint64_t repair_scan_cycles = 0;
 };
+
+inline uint64_t profile_cycles_now() {
+#if defined(__x86_64__) || defined(__i386__)
+    return __rdtsc();
+#else
+    return 0;
+#endif
+}
 
 class MappedIndex {
 public:
@@ -302,8 +320,11 @@ public:
                 if (stats) ++stats->initial_pruned;
                 continue;
             }
-            scan_cluster(c, q, top);
-            if (stats) ++stats->initial_scanned;
+            uint32_t blocks = scan_cluster(c, q, top, stats);
+            if (stats) {
+                ++stats->initial_scanned;
+                stats->initial_blocks += blocks;
+            }
             scanned[c >> 6] |= uint64_t(1) << (c & 63);
         }
 
@@ -320,8 +341,11 @@ public:
                     if (stats) ++stats->repair_pruned;
                     continue;
                 }
-                scan_cluster(c, q, top);
-                if (stats) ++stats->repair_scanned;
+                uint32_t blocks = scan_cluster(c, q, top, stats);
+                if (stats) {
+                    ++stats->repair_scanned;
+                    stats->repair_blocks += blocks;
+                }
             }
             fraud = top.fraud_count();
         }
@@ -491,21 +515,31 @@ private:
 
     uint8_t search_two_with_repair_avx2(const int16_t q[Dims], int repair_min, int repair_max, SearchStats* stats) const {
         const uint32_t kk = k();
+        uint64_t phase_start = stats ? profile_cycles_now() : 0;
         QueryPairs qp = make_query_pairs(q);
         uint32_t best0 = 0;
         uint32_t best1 = 1;
         find_two_centroids_avx2(q, qp, best0, best1);
+        if (stats) stats->centroid_cycles += profile_cycles_now() - phase_start;
 
+        phase_start = stats ? profile_cycles_now() : 0;
         Top5 top;
-        scan_cluster(best0, q, qp, top);
-        if (stats) ++stats->initial_scanned;
+        uint32_t blocks = scan_cluster(best0, q, qp, top, stats);
+        if (stats) {
+            ++stats->initial_scanned;
+            stats->initial_blocks += blocks;
+        }
 
         if (bbox_lower_bound(q, bbox_min_, bbox_max_, best1) >= top.worst_dist()) {
             if (stats) ++stats->initial_pruned;
         } else {
-            scan_cluster(best1, q, qp, top);
-            if (stats) ++stats->initial_scanned;
+            blocks = scan_cluster(best1, q, qp, top, stats);
+            if (stats) {
+                ++stats->initial_scanned;
+                stats->initial_blocks += blocks;
+            }
         }
+        if (stats) stats->initial_cycles += profile_cycles_now() - phase_start;
 
         uint8_t fraud = top.fraud_count();
         if (stats) {
@@ -520,6 +554,7 @@ private:
             const uint64_t repair_limit = top.worst_dist();
             alignas(32) uint32_t bounds[8];
             uint32_t c = 0;
+            phase_start = stats ? profile_cycles_now() : 0;
             for (; c + 8 <= kk; c += 8) {
                 bbox_lower_bounds8_avx2(q, c, bounds);
                 for (uint32_t lane = 0; lane < 8; ++lane) {
@@ -541,7 +576,12 @@ private:
                 }
                 candidates[candidate_count++] = (bound << 32) | c;
             }
+            if (stats) stats->repair_select_cycles += profile_cycles_now() - phase_start;
+            phase_start = stats ? profile_cycles_now() : 0;
+            if (stats) stats->repair_candidates += candidate_count;
             std::sort(candidates.begin(), candidates.begin() + candidate_count);
+            if (stats) stats->repair_sort_cycles += profile_cycles_now() - phase_start;
+            phase_start = stats ? profile_cycles_now() : 0;
             for (uint32_t i = 0; i < candidate_count; ++i) {
                 uint64_t packed = candidates[i];
                 uint64_t bound = packed >> 32;
@@ -549,9 +589,13 @@ private:
                     if (stats) ++stats->repair_pruned;
                     continue;
                 }
-                scan_cluster(uint32_t(packed), q, qp, top);
-                if (stats) ++stats->repair_scanned;
+                blocks = scan_cluster(uint32_t(packed), q, qp, top, stats);
+                if (stats) {
+                    ++stats->repair_scanned;
+                    stats->repair_blocks += blocks;
+                }
             }
+            if (stats) stats->repair_scan_cycles += profile_cycles_now() - phase_start;
             fraud = top.fraud_count();
         }
 
@@ -569,13 +613,19 @@ private:
         find_two_centroids_avx2(q, qp, best0, best1);
 
         Top5 top;
-        scan_cluster(best0, q, qp, top);
-        if (stats) ++stats->initial_scanned;
+        uint32_t blocks = scan_cluster(best0, q, qp, top, stats);
+        if (stats) {
+            ++stats->initial_scanned;
+            stats->initial_blocks += blocks;
+        }
         if (bbox_lower_bound(q, bbox_min_, bbox_max_, best1) >= top.worst_dist()) {
             if (stats) ++stats->initial_pruned;
         } else {
-            scan_cluster(best1, q, qp, top);
-            if (stats) ++stats->initial_scanned;
+            blocks = scan_cluster(best1, q, qp, top, stats);
+            if (stats) {
+                ++stats->initial_scanned;
+                stats->initial_blocks += blocks;
+            }
         }
         uint8_t fraud = top.fraud_count();
         if (stats) {
@@ -634,10 +684,11 @@ private:
         }
 
         Top5 top;
-        scan_cluster(best, q, top);
+        uint32_t blocks = scan_cluster(best, q, top, stats);
         uint8_t fraud = top.fraud_count();
         if (stats) {
             stats->initial_scanned = 1;
+            stats->initial_blocks = blocks;
             stats->initial_fraud = fraud;
             stats->final_fraud = fraud;
             stats->initial_worst_dist = top.worst_dist();
@@ -739,8 +790,11 @@ private:
                 if (stats) ++stats->initial_pruned;
                 continue;
             }
-            scan_cluster(cluster, q, top);
-            if (stats) ++stats->initial_scanned;
+            uint32_t blocks = scan_cluster(cluster, q, top, stats);
+            if (stats) {
+                ++stats->initial_scanned;
+                stats->initial_blocks += blocks;
+            }
         }
         uint8_t fraud = top.fraud_count();
         if (stats) {
@@ -752,17 +806,22 @@ private:
         return fraud;
     }
 
-    void scan_cluster(uint32_t c, const int16_t q[Dims], Top5& top) const {
+    uint32_t scan_cluster(uint32_t c, const int16_t q[Dims], Top5& top, SearchStats* stats = nullptr) const {
         QueryPairs qp = make_query_pairs(q);
-        scan_cluster(c, q, qp, top);
+        return scan_cluster(c, q, qp, top, stats);
     }
 
-    void scan_cluster(uint32_t c, const int16_t q[Dims], const QueryPairs& qp, Top5& top) const {
+    uint32_t scan_cluster(uint32_t c, const int16_t q[Dims], const QueryPairs& qp, Top5& top, SearchStats* stats = nullptr) const {
         uint32_t start = offsets_[c];
         uint32_t count = counts_[c];
         uint32_t blocks = (count + Block - 1) / Block;
         for (uint32_t bi = 0; bi < blocks; ++bi) {
             uint32_t block_id = start + bi;
+            if (bi + 1 < blocks) {
+                uint32_t next_block_id = start + bi + 1;
+                _mm_prefetch(reinterpret_cast<const char*>(blocks_ + size_t(next_block_id) * Dims * Block), _MM_HINT_T0);
+                _mm_prefetch(reinterpret_cast<const char*>(labels_ + size_t(next_block_id) * Block), _MM_HINT_T0);
+            }
             uint32_t valid = std::min<uint32_t>(Block, count - bi * Block);
             const int16_t* block = blocks_ + size_t(block_id) * Dims * Block;
             const uint8_t* labels = labels_ + size_t(block_id) * Block;
@@ -782,6 +841,7 @@ private:
                 top.add(s, labels[lane]);
             }
         }
+        return blocks;
     }
 
     static void scan_block8_avx2(const int16_t* block, const uint8_t* labels, const QueryPairs& qp, Top5& top) {

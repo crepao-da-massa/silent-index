@@ -49,8 +49,16 @@ struct LatencyBucket {
     std::vector<double> search_us;
     uint64_t initial_scanned = 0;
     uint64_t initial_pruned = 0;
+    uint64_t initial_blocks = 0;
     uint64_t repair_scanned = 0;
     uint64_t repair_pruned = 0;
+    uint64_t repair_blocks = 0;
+    uint64_t repair_candidates = 0;
+    uint64_t centroid_cycles = 0;
+    uint64_t initial_cycles = 0;
+    uint64_t repair_select_cycles = 0;
+    uint64_t repair_sort_cycles = 0;
+    uint64_t repair_scan_cycles = 0;
 
     void reserve(size_t n) {
         total_us.reserve(n);
@@ -62,8 +70,16 @@ struct LatencyBucket {
         search_us.push_back(search);
         initial_scanned += stats.initial_scanned;
         initial_pruned += stats.initial_pruned;
+        initial_blocks += stats.initial_blocks;
         repair_scanned += stats.repair_scanned;
         repair_pruned += stats.repair_pruned;
+        repair_blocks += stats.repair_blocks;
+        repair_candidates += stats.repair_candidates;
+        centroid_cycles += stats.centroid_cycles;
+        initial_cycles += stats.initial_cycles;
+        repair_select_cycles += stats.repair_select_cycles;
+        repair_sort_cycles += stats.repair_sort_cycles;
+        repair_scan_cycles += stats.repair_scan_cycles;
     }
 };
 
@@ -94,8 +110,16 @@ void print_bucket(const char* name, const LatencyBucket& bucket) {
               << " " << name << "_max_search_us=" << (bucket.search_us.empty() ? 0.0 : bucket.search_us.back())
               << " " << name << "_avg_initial_scanned=" << (count > 0 ? double(bucket.initial_scanned) / count : 0.0)
               << " " << name << "_avg_initial_pruned=" << (count > 0 ? double(bucket.initial_pruned) / count : 0.0)
+              << " " << name << "_avg_initial_blocks=" << (count > 0 ? double(bucket.initial_blocks) / count : 0.0)
               << " " << name << "_avg_repair_scanned=" << (count > 0 ? double(bucket.repair_scanned) / count : 0.0)
-              << " " << name << "_avg_repair_pruned=" << (count > 0 ? double(bucket.repair_pruned) / count : 0.0);
+              << " " << name << "_avg_repair_pruned=" << (count > 0 ? double(bucket.repair_pruned) / count : 0.0)
+              << " " << name << "_avg_repair_blocks=" << (count > 0 ? double(bucket.repair_blocks) / count : 0.0)
+              << " " << name << "_avg_repair_candidates=" << (count > 0 ? double(bucket.repair_candidates) / count : 0.0)
+              << " " << name << "_avg_centroid_cycles=" << (count > 0 ? double(bucket.centroid_cycles) / count : 0.0)
+              << " " << name << "_avg_initial_cycles=" << (count > 0 ? double(bucket.initial_cycles) / count : 0.0)
+              << " " << name << "_avg_repair_select_cycles=" << (count > 0 ? double(bucket.repair_select_cycles) / count : 0.0)
+              << " " << name << "_avg_repair_sort_cycles=" << (count > 0 ? double(bucket.repair_sort_cycles) / count : 0.0)
+              << " " << name << "_avg_repair_scan_cycles=" << (count > 0 ? double(bucket.repair_scan_cycles) / count : 0.0);
 }
 
 } // namespace

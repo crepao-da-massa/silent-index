@@ -252,24 +252,6 @@ bool vectorize_fast(std::string_view body, int16_t out[Dims]) {
     return true;
 }
 
-bool starts_with(std::string_view s, std::string_view prefix) {
-    return s.size() >= prefix.size() && std::memcmp(s.data(), prefix.data(), prefix.size()) == 0;
-}
-
-int content_length(std::string_view headers) {
-    size_t p = headers.find("Content-Length:");
-    if (p == std::string_view::npos) p = headers.find("content-length:");
-    if (p == std::string_view::npos) return 0;
-    p += 15;
-    while (p < headers.size() && headers[p] == ' ') ++p;
-    int n = 0;
-    while (p < headers.size() && headers[p] >= '0' && headers[p] <= '9') {
-        n = n * 10 + headers[p] - '0';
-        ++p;
-    }
-    return n;
-}
-
 struct Response {
     const char* data;
     size_t len;
@@ -288,6 +270,75 @@ struct SearchConfig {
     int adaptive_min = 1;
     int adaptive_max = 4;
 };
+
+enum class RequestKind : uint8_t {
+    Ready,
+    Fraud,
+    Other,
+};
+
+struct ParsedFrame {
+    RequestKind kind = RequestKind::Other;
+    size_t body_offset = 0;
+    size_t body_len = 0;
+    size_t total = 0;
+};
+
+inline bool lower_eq(char actual, char expected_lower) {
+    unsigned char c = static_cast<unsigned char>(actual);
+    if (c >= 'A' && c <= 'Z') c = static_cast<unsigned char>(c + ('a' - 'A'));
+    return c == static_cast<unsigned char>(expected_lower);
+}
+
+inline bool has_content_length_name(std::string_view s, size_t p) {
+    static constexpr std::string_view key = "content-length:";
+    if (p + key.size() > s.size()) return false;
+    for (size_t i = 0; i < key.size(); ++i) {
+        if (!lower_eq(s[p + i], key[i])) return false;
+    }
+    return true;
+}
+
+bool parse_frame(std::string_view data, ParsedFrame& out) {
+    size_t body_offset = std::string_view::npos;
+    for (size_t i = 3; i < data.size(); ++i) {
+        if (data[i - 3] == '\r' && data[i - 2] == '\n' && data[i - 1] == '\r' && data[i] == '\n') {
+            body_offset = i + 1;
+            break;
+        }
+    }
+    if (body_offset == std::string_view::npos) return false;
+
+    out.kind = RequestKind::Other;
+    if (data.size() >= 11 && std::memcmp(data.data(), "GET /ready", 10) == 0 && data[10] == ' ') {
+        out.kind = RequestKind::Ready;
+    } else if (data.size() >= 18 && std::memcmp(data.data(), "POST /fraud-score", 17) == 0 && data[17] == ' ') {
+        out.kind = RequestKind::Fraud;
+    }
+
+    size_t content_len = 0;
+    size_t line = 0;
+    while (line + 2 < body_offset) {
+        size_t next = line;
+        while (next + 1 < body_offset && !(data[next] == '\r' && data[next + 1] == '\n')) ++next;
+        if (has_content_length_name(data, line)) {
+            size_t p = line + 15;
+            while (p < next && (data[p] == ' ' || data[p] == '\t')) ++p;
+            while (p < next && data[p] >= '0' && data[p] <= '9') {
+                content_len = content_len * 10 + size_t(data[p] - '0');
+                ++p;
+            }
+        }
+        line = next + 2;
+    }
+
+    const size_t total = body_offset + content_len;
+    if (data.size() < total) return false;
+    out.body_offset = body_offset;
+    out.body_len = content_len;
+    out.total = total;
+    return true;
+}
 
 Response response_for_fraud_count(uint8_t fraud, bool close_after_response = false) {
     static constexpr Response keep_alive[] = {
@@ -353,14 +404,10 @@ bool process_buffer(Conn& conn, const silent::MappedIndex& index, const SearchCo
     size_t consumed = 0;
     while (true) {
         std::string_view data(conn.buf.data() + consumed, conn.have - consumed);
-        size_t hdr_end = data.find("\r\n\r\n");
-        if (hdr_end == std::string_view::npos) break;
-        std::string_view headers = data.substr(0, hdr_end + 4);
-        int clen = content_length(headers);
-        size_t total = hdr_end + 4 + size_t(clen);
-        if (data.size() < total) break;
+        ParsedFrame frame;
+        if (!parse_frame(data, frame)) break;
 
-        if (starts_with(headers, "GET /ready ")) {
+        if (frame.kind == RequestKind::Ready) {
             static constexpr const char ready_keep[] = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\nConnection: keep-alive\r\n\r\n{\"status\":\"ok\"}";
             static constexpr const char ready_close[] = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\nConnection: close\r\n\r\n{\"status\":\"ok\"}";
             if (close_after_response) {
@@ -368,8 +415,8 @@ bool process_buffer(Conn& conn, const silent::MappedIndex& index, const SearchCo
             } else {
                 if (!write_response(conn.fd, {ready_keep, sizeof(ready_keep) - 1})) return false;
             }
-        } else if (starts_with(headers, "POST /fraud-score ")) {
-            std::string_view body = data.substr(hdr_end + 4, size_t(clen));
+        } else if (frame.kind == RequestKind::Fraud) {
+            std::string_view body = data.substr(frame.body_offset, frame.body_len);
             int16_t q[Dims];
             if (!vectorize_fast(body, q)) {
                 if (!write_response(conn.fd, response_for_fraud_count(0, close_after_response))) return false;
@@ -380,7 +427,7 @@ bool process_buffer(Conn& conn, const silent::MappedIndex& index, const SearchCo
         } else {
             if (!write_response(conn.fd, response_for_fraud_count(0, close_after_response))) return false;
         }
-        consumed += total;
+        consumed += frame.total;
         if (close_after_response) return false;
     }
     if (consumed > 0) {

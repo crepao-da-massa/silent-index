@@ -17,7 +17,7 @@ test: build
 
 index: build
 	mkdir -p build/index
-	./build/build-index bench/references.json.gz build/index/index.bin 4096 50000 10
+	./build/build-index bench/references.json.gz build/index/index.bin 1968 65536 6
 
 profile: build
 	./build/profile build/index.bin bench/test-data.json 4 8 12 16 24 32

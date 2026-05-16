@@ -17,7 +17,7 @@ RUN mkdir -p /out /index \
     && g++ -Ofast -DNDEBUG -std=c++20 -march=haswell -mtune=haswell -mavx2 -mfma -flto -fno-exceptions -fno-rtti -pthread -static-libstdc++ -static-libgcc src/server.cpp -o /out/server \
     && gcc -O3 -DNDEBUG -std=c11 -march=haswell -mtune=haswell -flto -static -s src/fd_lb.c -o /out/fd-lb
 COPY --from=references /work/references.json.gz /tmp/references.json.gz
-RUN /out/build-index /tmp/references.json.gz /index/index.bin 1664 65536 6 \
+RUN /out/build-index /tmp/references.json.gz /index/index.bin 1968 65536 6 \
     && ls -lh /index/index.bin
 
 FROM --platform=linux/amd64 debian:trixie-slim AS runtime
