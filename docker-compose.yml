@@ -1,6 +1,6 @@
 services:
   lb:
-    image: ghcr.io/crepao-da-massa/silent-index@sha256:48d70c74107afa939c4b96af4359a84ca8f62c60c1a766ae0cdf8e1c4f3fe09d
+    image: ghcr.io/crepao-da-massa/silent-index@sha256:958caccbfb23fb3ff916c922d4c6ff0fb194ee01239e02251e45caa47d84b4b3
     entrypoint: ["/fd-lb"]
     ports:
       - "9999:9999"
@@ -25,7 +25,7 @@ services:
           memory: "30M"
 
   api1:
-    image: ghcr.io/crepao-da-massa/silent-index@sha256:48d70c74107afa939c4b96af4359a84ca8f62c60c1a766ae0cdf8e1c4f3fe09d
+    image: ghcr.io/crepao-da-massa/silent-index@sha256:958caccbfb23fb3ff916c922d4c6ff0fb194ee01239e02251e45caa47d84b4b3
     environment:
       - LISTEN=/sockets/api1.sock
       - INDEX_PATH=/index/index.bin
@@ -52,7 +52,7 @@ services:
           memory: "160M"
 
   api2:
-    image: ghcr.io/crepao-da-massa/silent-index@sha256:48d70c74107afa939c4b96af4359a84ca8f62c60c1a766ae0cdf8e1c4f3fe09d
+    image: ghcr.io/crepao-da-massa/silent-index@sha256:958caccbfb23fb3ff916c922d4c6ff0fb194ee01239e02251e45caa47d84b4b3
     environment:
       - LISTEN=/sockets/api2.sock
       - INDEX_PATH=/index/index.bin
